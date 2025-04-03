@@ -1,6 +1,5 @@
 ---
 title: "Assignment 2"
-author: "Nhung Dinh, Sookyung Kim"
 date: "`r Sys.Date()`"
 format: 
   html:
