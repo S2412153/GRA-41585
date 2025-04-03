@@ -1,6 +1,5 @@
 ---
 title: "Task 4"
-author: "Nhung Dinh, Sookyung Kim"
 date: "`r Sys.Date()`"
 format: 
   html:
