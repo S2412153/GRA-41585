@@ -1,0 +1,885 @@
+---
+title: "Task 4"
+author: "Nhung Dinh, Sookyung Kim"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    embed-resources: true
+    self-contained-math: true
+toc: true
+---
+
+```{r setup, include=FALSE}
+# Load necessary packages
+library(tidyverse) # Includes ggplot2, dplyr, tidyr
+library(fixest) # Fixed effects models
+library(Synth)
+library(synthdid)
+library(viridis) # Color palettes for ggplot2
+```
+
+## Assignment 4
+
+Your task as a data scientist at a multi-store retail chain is to determine the impact of a new instore marketing strategy on the sales level of a specific store in Norway. A randomized design is not feasible at this stage due to cost and complexity of implementing the new strategy at all stores and the uncertainty of its effectiveness. Thus, you will need to analyze the historical data to gain insights into the effects of the new strategy as given in the data file `Store_data.csv.`
+
+The file gives you access to a dataset that includes the weekly sales data for two affected products in all stores across the chain for the years 2023 and 2024. Additionally, you have information on the weekly prices of the two products (*p1sales* and *p2sales*), whether there was a promotion during the week for each product (*p1prom* and *p2prom*), a competition index for the store (*compind*), the store size (*storesize*), and the city size (*citysize*). Promotions are coordinated on the city level; prices are set independently across the stores by the store manager.
+
+To assess the impact of the new marketing strategy, you will have to analyze the sales data for the treated and untreated stores. The treatment took place in week 26 of year 2 (2024; i.e., *weekind* 78) for store 109. There is also a dummy variable (*Post*) to indicate the post-treatment period.
+
+Your main objective is to determine how the new marketing strategy affects the weekly sales level of the treated store for the two products, taking into account the various variables and factors mentioned above. You will need to perform statistical analysis and generate insights to draw conclusions about the impact of the new strategy
+
+### Data Loading and Preprocessing
+
+The code begins by reading the comma-separated values (CSV) file named "Store_data_2025.csv" using the `read.csv` function. In this step, some new variables are created for further analysis: dummy variable `Treated` for treated unit (`storeNum==109` from `weekind>=78`), and variable `StoreID` for synthetic DID analysis.
+
+```{r}
+data = read.csv('Store_data_2025.csv', sep = ';')
+data$Treated = ifelse(data$Weekind>=78 & data$storeNum==109,1,0)
+data$StoreID = as.character(data$storeNum)
+str(data)
+```
+
+### Pre-Post Analysis
+
+Pre-post analysis utilized Ordinary Least Squares (OLS) regression applied exclusively to `storeNum==109`, segmented into pre-treatment `weekind<78` and post-treatment `weekind>=78` for each product. This straight-forward approach examines changes in sales attributable to the treatment within the treated store. However, its lack of a control group, which may lead to overestimation the treatment effect.
+
+```{r}
+# Pre-Post Analysis
+summary(lm(p1sales ~ p1price + p1prom + Treated, data = 
+             data %>% filter(storeNum == '109')))
+summary(lm(p2sales ~ p2price + p2prom + Treated, data = 
+             data %>% filter(storeNum == '109')))
+# intercept: baseline weekly sales - no promotion - post-treatment
+# Treated: treatment effect
+```
+
+### Difference-in-Differences (DID) analysis
+
+To address the limitation of pre-post analysis, DID was conducted, leveraging data across all stores to compare the change in sales for `storeNum==109` (the treated unit) against untreated stores (the control group) before and after the treatment.
+
+This method incorporated two-way fixed effects - unit-specific `storeNum` and time-specific `weekind` - to account for unobserved heterogeneity across stores and temporal trends. By using untreated stores as a counterfactual, DID reduces bias from time-invariant factors or general market trends.
+
+```{r}
+# Difference-in-Differences (DID)
+feols.p1 = feols(p1sales ~ Treated + p1price + p1prom |storeNum + Weekind, data = data)
+summary(feols.p1)
+
+feols.p2 = feols(p2sales ~ Treated + p2price + p2prom |storeNum + Weekind, data = data)
+summary(feols.p2)
+```
+
+The treatment effect from this approach is different from pre-post analysis.
+
+|                   | Product 1 | Product 2 |
+|-------------------|:---------:|:---------:|
+| Pre-Post Analysis |   36.05   |  -21.02   |
+| DID Analysis      |   42.08   |  -15.10   |
+
+Nonetheless, its validity hinges on the parallel trends assumption, which posits that pre-treatment sales trends for treated and untreated units are similar. `storeNum==109` exhibited an increasing pre-treatment trend while control stores showed a flat/mildly decreasing trend, potentially skewing the estimated treatment effect.
+
+```{r}
+#| warning: false
+
+p1sales.plot <- data %>% 
+  select(storeNum, Weekind, p1sales) %>% 
+  mutate(Group = factor(storeNum == 109, 
+                          labels = c("Control", "Treated"))) %>% 
+  group_by(Group, Weekind) %>%
+  summarize(p1sales = mean(p1sales), .groups = "drop")
+
+ggplot(p1sales.plot, aes(x = Weekind, y = p1sales, color = Group)) +
+ geom_line(aes(linetype = Group), linewidth = 1) +
+  scale_linetype_manual(values = c("solid", "solid")) +
+  labs(title = "Product1 Sales: Treated vs. Untreated",
+       x = "Time",
+       y = "Sales") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Testing for parallel trends using a linear model
+# GroupTreated:Weekind represents the difference in the slope of p1sales between the Treated and Control groups
+summary(lm(p1sales ~ Group + Weekind + Group:Weekind, data = p1sales.plot[p1sales.plot$Weekind < 78, ]))
+```
+
+```{r}
+#| warning: false
+
+p2sales.plot <- data %>% 
+  select(storeNum, Weekind, p2sales) %>% 
+  mutate(Group = factor(storeNum == 109, 
+                          labels = c("Untreated", "Treated"))) %>% 
+  group_by(Group, Weekind) %>%
+  summarize(p2sales = mean(p2sales), .groups = "drop")
+
+ggplot(p2sales.plot, aes(x = Weekind, y = p2sales, color = Group)) +
+ geom_line(aes(linetype = Group), linewidth = 1) +
+  scale_linetype_manual(values = c("solid", "solid")) +
+  labs(title = "Product2 Sales: Treated vs. Untreated",
+       x = "Time",
+       y = "Sales") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Testing for parallel trends using a linear model
+# GroupTreated:Weekind represents the difference in the slope of p1sales between the Treated and Control groups
+summary(lm(p2sales ~ Group + Weekind + Group:Weekind, data = p2sales.plot[p2sales.plot$Weekind < 78, ]))
+```
+
+### Synthetic Control Analysis
+
+To address the above issue, an alternative approach, Synthetic Control Analysis, was employed to construct a more tailored counterfactual for `storeNum==109`. This method creates a weighted combination of untreated stores that closely matches `storeNum==109` pre-treatment sales and characteristics.
+
+Synthetic Control relaxes the parallel trends assumption by directly matching pre-treatment outcomes, offering a potentially more accurate counterfactual. However, its effectiveness depends on the availability of a robust control pool capable of producing a near-perfect match.
+
+The `dataprep` function from the `Synth` package prepares the data for analysis. The `synth.out` object stores the results of the analysis, including information about the weights assigned to each control unit in the synthetic control group. The `synth.tab` function displays a summary table of the optimization process.
+
+```{r}
+p1.prep <- dataprep(
+       foo = data,
+       dependent = 'p1sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p1price", 50:77, "mean"),
+           list("p1prom", 50:77, "mean"),
+           list("p1sales", 77, "mean"),
+           list("p1sales", 76, "mean"),
+           list("p1sales", 75, "mean"),
+           list("p1sales", 72, "mean"),
+           list("p1sales", 69, "mean"),
+           list("p1sales", 65, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+p1.synth.out = synth(data.prep.obj = p1.prep)
+print(synth.tab(dataprep.res = p1.prep, synth.res = p1.synth.out))
+```
+
+The `path.plot` function is used to visualize the trends in the dependent variable for both the treated group and the synthetic control group. The `gaps.plot` function is employed to plot the difference in the dependent variable between the treated group and the synthetic control group.
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = p1.synth.out,
+        dataprep.res = p1.prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$p1sales),max(data$p1sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = p1.synth.out,
+       dataprep.res = p1.prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+# calculate an average ATET over all post treatment periods
+p1.atet <- p1.prep$Y1plot - (p1.prep$Y0plot %*% p1.synth.out$solution.w)
+post.dum <- 1:104>77
+mean(p1.atet[post.dum])
+```
+
+```{r}
+p2.prep <- dataprep(
+       foo = data,
+       dependent = 'p2sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p2price", 50:77, "mean"),
+           list("p2prom", 50:77, "mean"),
+           list("p2sales", 77, "mean"),
+           list("p2sales", 76, "mean"),
+           list("p2sales", 75, "mean"),
+           list("p2sales", 72, "mean"),
+           list("p2sales", 69, "mean"),
+           list("p2sales", 65, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+p2.synth.out = synth(data.prep.obj = p2.prep)
+print(synth.tab(dataprep.res = p2.prep, synth.res = p2.synth.out))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = p2.synth.out,
+        dataprep.res = p2.prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$p2sales),max(data$p2sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = p2.synth.out,
+       dataprep.res = p2.prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+p2.atet <- p2.prep$Y1plot - (p2.prep$Y0plot %*% p2.synth.out$solution.w)
+post.dum <- 1:104>77
+mean(p2.atet[post.dum])
+```
+
+Comparison between the treatment effect from this approach and from pre-post analysis and DID
+
+| Metric            | Product 1 | Product 2 |
+|-------------------|:---------:|:---------:|
+| Pre-Post Analysis |   36.05   |  -21.02   |
+| DID Analysis      |   42.08   |  -15.10   |
+| Synthetic Control |   35.40   |  -19.50   |
+
+Similar to product 1, the estimated effect from Synthetic Control analysis for product 2 closely align with Pre-Post Analysis.
+
+### Synthetic DID
+
+Synthetic DID combined elements of both DID and synthetic control methods. This hybrid approach re-weights untreated stores to align their pre-treatment trends with `numStore==109` and then applies the DID framework.
+
+This method mitigates the need for a perfect pre-treatment match while still requiring only that trends be mimicked rather than identical. This balances the strengths of its predecessors while addressing some of their weaknesses.
+
+```{r}
+#| warning: false
+p1sales <- panel.matrices(data.frame(data$StoreID, data$Weekind, 
+                                     data$p1sales, data$Treated))
+p1.sdid.out <- synthdid_estimate(p1sales$Y, p1sales$N0, p1sales$T0)
+
+# Show main results
+summary(p1.sdid.out)
+
+# Plot the results
+plot(p1.sdid.out)+theme_minimal()+theme(legend.position = "bottom")
+```
+
+```{r}
+#| warning: false
+p2sales <- panel.matrices(data.frame(data$StoreID, data$Weekind, 
+                                     data$p2sales, data$Treated))
+p2.sdid.out <- synthdid_estimate(p2sales$Y, p2sales$N0, p2sales$T0)
+
+# Show main results
+summary(p2.sdid.out)
+
+# Plot the results
+plot(p2.sdid.out)+theme_minimal()+theme(legend.position = "bottom")
+```
+
+Comparison between the treatment effect from different methods
+
+| Metric            | Product 1 | Product 2 |
+|-------------------|:---------:|:---------:|
+| Pre-Post Analysis |   36.05   |  -21.02   |
+| DID Analysis      |   42.08   |  -15.10   |
+| Synthetic Control |   35.40   |  -19.50   |
+| Synthetic DID     |   30.11   |  -22.42   |
+
+In conclusion, the pre-post linear model, while intuitive, is the least robust, ignoring trends and external factors. DID’s reliance on parallel trends is compromised by the observed trend divergence, reducing its reliability. Synthetic control, though flexible, struggles with imperfect counterfactuals due to trend mismatches. Synthetic DID emerges as the most reliable, balancing trend adjustment and covariates matching.
+
+However, given the significant effect of promotions, an extended analysis adjusted the sales data by subtracting the estimated promotion effects to isolate the marketing strategy’s stand-alone impact. The approach is somewhat naive and infancy, but it offers valuable insights into sales performance with minimal impact from promotions
+
+### Extended Analysis
+
+Perform an OLS regression for each product at each store to estimate the effect of promotion, then adjust the sales data by removing the estimated promotional effect for each store.
+
+```{r}
+# estimate promotion effect
+prom.effect <- function(data){
+  storeNum = unique(data$storeNum)
+  p1prom.effect = numeric(21)
+  p2prom.effect = numeric(21)
+  for (s in storeNum){
+    mod.p1 = lm(p1sales ~ p1price + p1prom, data = 
+             data %>% filter(storeNum == s))
+    mod.p2 = lm(p2sales ~ p2price + p2prom, data = 
+             data %>% filter(storeNum == s))
+    p1prom.effect[s-100] = coef(mod.p1)['p1prom']
+    p2prom.effect[s-100] = coef(mod.p2)['p2prom']
+  }
+  return(data.frame(
+    storeNum = storeNum, 
+    p1prom.effect = p1prom.effect, 
+    p2prom.effect = p2prom.effect
+  ))
+}
+
+promotion_effects = prom.effect(data)
+write.csv(promotion_effects, "promotion_effects.csv", row.names = FALSE)
+promotion_effects
+```
+
+The promotion effects varied across stores, with minimum effect at `storeNum==111` (11.6 for product 1 and 38.8 for product 2), and maximum effect at `storeNum==103` (51.9 for product 1 and 123.7 for product 2).
+
+```{r}
+# subtract the estimated promotion effect from sales
+# adjust sales by subtracting the estimated promotion effect obtained from feols
+data <- data %>%
+  mutate(
+    ap1sales = p1sales - ifelse(p1prom == 1, coef(feols.p1)['p1prom'], 0),
+    ap2sales = p2sales - ifelse(p2prom == 1, coef(feols.p2)['p2prom'], 0)
+  ) %>%
+  left_join(promotion_effects, by = "storeNum") %>%
+  mutate(
+    sp1sales = p1sales - ifelse(p1prom == 1, p1prom.effect, 0),
+    sp2sales = p2sales - ifelse(p2prom == 1, p2prom.effect, 0)
+  )
+```
+
+Visualizing sales of `numStore==109` and average of control stores to investigate trends over time
+
+```{r}
+#| warning: false
+
+sp1sales.plot <- data %>% 
+  select(storeNum, Weekind, sp1sales) %>% 
+  mutate(Group = factor(storeNum == 109, 
+                          labels = c("Control", "Treated"))) %>% 
+  group_by(Group, Weekind) %>%
+  summarize(sp1sales = mean(sp1sales), .groups = "drop")
+
+ggplot(sp1sales.plot, aes(x = Weekind, y = sp1sales, color = Group)) +
+ geom_line(aes(linetype = Group), linewidth = 1) +
+  scale_linetype_manual(values = c("solid", "solid")) +
+  labs(title = "Product1 Sales: Treated vs. Control",
+       x = "Time",
+       y = "Sales") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Testing for parallel trends using a linear model
+# GroupTreated:Weekind represents the difference in the slope of p1sales between the Treated and Control groups
+summary(lm(sp1sales ~ Group + Weekind + Group:Weekind, data = sp1sales.plot[sp1sales.plot$Weekind < 78, ]))
+```
+
+```{r}
+sp2sales.plot <- data %>% 
+  select(storeNum, Weekind, sp2sales) %>% 
+  mutate(Group = factor(storeNum == 109, 
+                          labels = c("Control", "Treated"))) %>% 
+  group_by(Group, Weekind) %>%
+  summarize(sp2sales = mean(sp2sales), .groups = "drop")
+
+ggplot(sp2sales.plot, aes(x = Weekind, y = sp2sales, color = Group)) +
+ geom_line(aes(linetype = Group), linewidth = 1) +
+  scale_linetype_manual(values = c("solid", "solid")) +
+  labs(title = "Product1 Sales: Treated vs. Control",
+       x = "Time",
+       y = "Sales") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Testing for parallel trends using a linear model
+# GroupTreated:Weekind represents the difference in the slope of p1sales between the Treated and Control groups
+summary(lm(sp2sales ~ Group + Weekind + Group:Weekind, data = sp2sales.plot[sp2sales.plot$Weekind < 78, ]))
+```
+
+Visualizing sales across different stores to investigate trends over time
+
+```{r}
+# Filter data for OSLO stores
+oslo_data <- data %>%
+  filter(city == "OSLO") %>%
+  pivot_longer(cols = c(sp1sales, sp2sales), names_to = "Product", values_to = "Sales")
+
+# Plot sales for each store in OSLO
+ggplot(oslo_data, aes(x = Weekind, y = Sales, color = Product)) +
+  geom_line(aes(linetype = Product), linewidth = 1) +  
+  facet_wrap(~storeNum, scales = "free_y") +  
+  scale_color_manual(values = c("sp1sales" = "blue", "sp2sales" = "red")) + 
+  labs(title = "Product Sales in OSLO stores",
+       x = "Time",
+       y = "Sales",
+       color = "Product",
+       linetype = "Product") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# Filter data for BERGEN stores
+bergen_data <- data %>%
+  filter(city == "BERGEN") %>%
+  pivot_longer(cols = c(sp1sales, sp2sales), names_to = "Product", values_to = "Sales")
+
+# Plot sales for each store in BERGEN
+ggplot(bergen_data, aes(x = Weekind, y = Sales, color = Product)) +
+  geom_line(aes(linetype = Product), linewidth = 1) +  
+  facet_wrap(~storeNum, scales = "free_y") +  
+  scale_color_manual(values = c("sp1sales" = "blue", "sp2sales" = "red")) + 
+  labs(title = "Product Sales in BERGEN stores",
+       x = "Time",
+       y = "Sales",
+       color = "Product",
+       linetype = "Product") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# Filter data for BODO and DRAM stores
+bododram_data <- data %>%
+  filter(city %in% c("BODO",'DRAM')) %>%
+  pivot_longer(cols = c(sp1sales, sp2sales), names_to = "Product", values_to = "Sales")
+
+# Plot sales for each store in BODO and DRAM
+ggplot(bododram_data, aes(x = Weekind, y = Sales, color = Product)) +
+  geom_line(aes(linetype = Product), linewidth = 1) +  
+  facet_wrap(~storeNum, scales = "free_y") +  
+  scale_color_manual(values = c("sp1sales" = "blue", "sp2sales" = "red")) + 
+  labs(title = "Product Sales in BODO and DRAM stores",
+       x = "Time",
+       y = "Sales",
+       color = "Product",
+       linetype = "Product") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# Filter data for 'FRED','KRIST','TROM' stores
+frktr_data <- data %>%
+  filter(city %in% c("FRED",'KRIST','TROM')) %>%
+  pivot_longer(cols = c(sp1sales, sp2sales), names_to = "Product", values_to = "Sales")
+
+# Plot sales for each store in 'FRED','KRIST','TROM'
+ggplot(frktr_data, aes(x = Weekind, y = Sales, color = Product)) +
+  geom_line(aes(linetype = Product), linewidth = 1) +  
+  facet_wrap(~storeNum, scales = "free_y") +  
+  scale_color_manual(values = c("sp1sales" = "blue", "sp2sales" = "red")) + 
+  labs(title = "Product Sales in FRED KRIST TROM stores",
+       x = "Time",
+       y = "Sales",
+       color = "Product",
+       linetype = "Product") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# Filter data for STAV and TROND stores
+stavtrond_data <- data %>%
+  filter(city %in% c('STAV','TROND'), storeNum != 109) %>%
+  pivot_longer(cols = c(sp1sales, sp2sales), names_to = "Product", values_to = "Sales")
+
+# Plot sales for each store in STAV and TROND
+ggplot(stavtrond_data, aes(x = Weekind, y = Sales, color = Product)) +
+  geom_line(aes(linetype = Product), linewidth = 1) +  
+  facet_wrap(~storeNum, scales = "free_y") +  
+  scale_color_manual(values = c("sp1sales" = "blue", "sp2sales" = "red")) + 
+  labs(title = "Product Sales in STAV and TROND stores",
+       x = "Time",
+       y = "Sales",
+       color = "Product",
+       linetype = "Product") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Overall, Products 1 and 2 exhibit similar trends within individual stores, but show different trends across stores, even within the same city.
+
+Product 2 has higher sales in most stores, except for store numbers 115, 118, and 121.
+
+The adjusted sales trends for the promotional effect over time are generally smooth, except for store numbers 115 and 121.
+
+The visualization highlights that some stores show a decreasing trend, while others exhibit an increasing trend. The stores with an increasing trend should be considered for inclusion in the synthetic control formation.
+
+#### Synthetic Control Analysis
+
+```{r}
+sp1.prep <- dataprep(
+       foo = data,
+       dependent = 'sp1sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p1price", 50:77, "mean"),
+           list("sp1sales", 77, "mean"),
+           list("sp1sales", 76, "mean"),
+           list("sp1sales", 75, "mean"),
+           list("sp1sales", 72, "mean"),
+           list("sp1sales", 69, "mean"),
+           list("sp1sales", 65, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+sp1.synth.out = synth(data.prep.obj = sp1.prep)
+print(synth.tab(dataprep.res = sp1.prep, synth.res = sp1.synth.out))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = sp1.synth.out,
+        dataprep.res = sp1.prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$sp1sales),max(data$sp1sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = sp1.synth.out,
+       dataprep.res = sp1.prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+sp1.atet <- sp1.prep$Y1plot - (sp1.prep$Y0plot %*% sp1.synth.out$solution.w)
+post.dum <- 1:104>77
+mean(sp1.atet[post.dum])
+```
+
+```{r}
+# How about analysis on adjusted sales after subtracting promotion effects from feols?
+ap1.prep <- dataprep(
+       foo = data,
+       dependent = 'ap1sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p1price", 50:77, "mean"),
+           list("ap1sales", 77, "mean"),
+           list("ap1sales", 76, "mean"),
+           list("ap1sales", 75, "mean"),
+           list("ap1sales", 72, "mean"),
+           list("ap1sales", 69, "mean"),
+           list("ap1sales", 65, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+ap1.synth.out = synth(data.prep.obj = ap1.prep)
+print(synth.tab(dataprep.res = ap1.prep, synth.res = ap1.synth.out))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = ap1.synth.out,
+        dataprep.res = ap1.prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$ap1sales),max(data$ap1sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = ap1.synth.out,
+       dataprep.res = ap1.prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+ap1.atet <- ap1.prep$Y1plot - (ap1.prep$Y0plot %*% ap1.synth.out$solution.w)
+post.dum <- 1:104>77
+mean(ap1.atet[post.dum])
+```
+
+```{r}
+sp2.prep <- dataprep(
+       foo = data,
+       dependent = 'sp2sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p2price", 50:77, "mean"),
+           list("sp2sales", 77, "mean"),
+           list("sp2sales", 76, "mean"),
+           list("sp2sales", 75, "mean"),
+           list("sp2sales", 72, "mean"),
+           list("sp2sales", 69, "mean"),
+           list("sp2sales", 65, "mean"),
+           list("sp2sales", 60, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+sp2.synth.out = synth(data.prep.obj = sp2.prep)
+print(synth.tab(dataprep.res = sp2.prep, synth.res = sp2.synth.out))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = sp2.synth.out,
+        dataprep.res = sp2.prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$sp2sales),max(data$sp2sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = sp2.synth.out,
+       dataprep.res = sp2.prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+sp2.atet <- sp2.prep$Y1plot - (sp2.prep$Y0plot %*% sp2.synth.out$solution.w)
+post.dum <- 1:104>77
+mean(sp2.atet[post.dum])
+```
+
+```{r}
+# How about analysis on adjusted sales after subtracting promotion effects from feols?
+ap2.prep <- dataprep(
+       foo = data,
+       dependent = 'ap2sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p2price", 50:77, "mean"),
+           list("ap2sales", 77, "mean"),
+           list("ap2sales", 76, "mean"),
+           list("ap2sales", 75, "mean"),
+           list("ap2sales", 72, "mean"),
+           list("ap2sales", 69, "mean"),
+           list("ap2sales", 65, "mean"),
+           list("ap2sales", 60, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+ap2.synth.out = synth(data.prep.obj = ap2.prep)
+print(synth.tab(dataprep.res = ap2.prep, synth.res = ap2.synth.out))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = ap2.synth.out,
+        dataprep.res = ap2.prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$ap2sales),max(data$ap2sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = ap2.synth.out,
+       dataprep.res = ap2.prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+ap2.atet <- ap2.prep$Y1plot - (ap2.prep$Y0plot %*% ap2.synth.out$solution.w)
+post.dum <- 1:104>77
+mean(ap2.atet[post.dum])
+```
+
+#### Synthetic DID
+
+```{r}
+#| warning: false
+sp1sales <- panel.matrices(data.frame(data$StoreID, data$Weekind, 
+                                     data$sp1sales, data$Treated))
+sp1.sdid.out <- synthdid_estimate(sp1sales$Y, sp1sales$N0, sp1sales$T0)
+
+# Show main results
+summary(sp1.sdid.out)
+
+# Plot the results
+plot(sp1.sdid.out)+theme_minimal()+theme(legend.position = "bottom")
+```
+
+```{r}
+#| warning: false
+# How about analysis on adjusted sales after subtracting promotion effects from feols?
+ap1sales <- panel.matrices(data.frame(data$StoreID, data$Weekind, 
+                                     data$ap1sales, data$Treated))
+ap1.sdid.out <- synthdid_estimate(ap1sales$Y, ap1sales$N0, ap1sales$T0)
+
+# Show main results
+summary(ap1.sdid.out)
+
+# Plot the results
+plot(ap1.sdid.out)+theme_minimal()+theme(legend.position = "bottom")
+```
+
+```{r}
+#| warning: false
+sp2sales <- panel.matrices(data.frame(data$StoreID, data$Weekind, 
+                                     data$sp2sales, data$Treated))
+sp2.sdid.out <- synthdid_estimate(sp2sales$Y, sp2sales$N0, sp2sales$T0)
+
+# Show main results
+summary(sp2.sdid.out)
+
+# Plot the results
+plot(sp2.sdid.out)+theme_minimal()+theme(legend.position = "bottom")
+```
+
+```{r}
+#| warning: false
+# How about analysis on adjusted sales after subtracting promotion effects from feols?
+ap2sales <- panel.matrices(data.frame(data$StoreID, data$Weekind, 
+                                     data$ap2sales, data$Treated))
+ap2.sdid.out <- synthdid_estimate(ap2sales$Y, ap2sales$N0, ap2sales$T0)
+
+# Show main results
+summary(ap2.sdid.out)
+
+# Plot the results
+plot(ap2.sdid.out)+theme_minimal()+theme(legend.position = "bottom")
+```
+
+The `synthdid` package also has functions to implement the DID and the SC method and to compare the three methods. Differences to the previous Synthetic Control estimate arise because this package does not use the covariates but only pre-treatment outcomes for calculating the weights.
+
+```{r}
+sp1.sc.out   = sc_estimate(sp1sales$Y, sp1sales$N0, sp1sales$T0)
+sp1.did.out  = did_estimate(sp1sales$Y, sp1sales$N0, sp1sales$T0)
+sp1.estimates = list(sp1.did.out, sp1.sc.out, sp1.sdid.out)
+names(sp1.estimates) = c('Diff-in-Diff', 'Synthetic Control', 'Synthetic Diff-in-Diff')
+print(unlist(sp1.estimates))
+synthdid_plot(sp1.estimates, facet.vertical = FALSE)
+```
+
+```{r}
+# How about analysis on adjusted sales after subtracting promotion effects from feols?
+ap1.sc.out   = sc_estimate(ap1sales$Y, ap1sales$N0, ap1sales$T0)
+ap1.did.out  = did_estimate(ap1sales$Y, ap1sales$N0, ap1sales$T0)
+ap1.estimates = list(ap1.did.out, ap1.sc.out, ap1.sdid.out)
+names(ap1.estimates) = c('Diff-in-Diff', 'Synthetic Control', 'Synthetic Diff-in-Diff')
+print(unlist(ap1.estimates))
+synthdid_plot(ap1.estimates, facet.vertical = FALSE)
+```
+
+```{r}
+sp2.sc.out   = sc_estimate(sp2sales$Y, sp2sales$N0, sp2sales$T0)
+sp2.did.out  = did_estimate(sp2sales$Y, sp2sales$N0, sp2sales$T0)
+sp2.estimates = list(sp2.did.out, sp2.sc.out, sp2.sdid.out)
+names(sp2.estimates) = c('Diff-in-Diff', 'Synthetic Control', 'Synthetic Diff-in-Diff')
+print(unlist(sp2.estimates))
+synthdid_plot(sp2.estimates, facet.vertical = FALSE)
+```
+
+```{r}
+# How about analysis on adjusted sales after subtracting promotion effects from feols?
+ap2.sc.out   = sc_estimate(ap2sales$Y, ap2sales$N0, ap2sales$T0)
+ap2.did.out  = did_estimate(ap2sales$Y, ap2sales$N0, ap2sales$T0)
+ap2.estimates = list(ap2.did.out, ap2.sc.out, ap2.sdid.out)
+names(ap2.estimates) = c('Diff-in-Diff', 'Synthetic Control', 'Synthetic Diff-in-Diff')
+print(unlist(ap2.estimates))
+synthdid_plot(ap2.estimates, facet.vertical = FALSE)
+```
+
+#### Tuning for predictors
+
+In this section, the predictors in **Synthetic Control** are adjusted to evaluate the performance of the models:
+
+-   **Product 1**: The adjusted sales of week 60 are added. However, week 60 receives an unrealistically high weight (0.5), which is problematic since it is 17 weeks (\~4 months) before the treatment period, making it unlikely to have such a strong predictive impact on future sales.
+-   **Product 2**: The adjusted sales of week 60 are removed. This results in an extremely high MSPE (308), indicating a poor model fit. Introducing sale of week 60 reduces MSPE to 19, with a more reasonable weight of 0.264, suggesting a moderate effect from historical sales
+
+```{r}
+p1prep <- dataprep(
+       foo = data,
+       dependent = 'sp1sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p1price", 50:77, "mean"),
+           list("sp1sales", 77, "mean"),
+           list("sp1sales", 76, "mean"),
+           list("sp1sales", 75, "mean"),
+           list("sp1sales", 72, "mean"),
+           list("sp1sales", 69, "mean"),
+           list("sp1sales", 65, "mean"),
+           list("sp1sales", 60, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+p1synthout = synth(data.prep.obj = p1prep)
+print(synth.tab(dataprep.res = p1prep, synth.res = p1synthout))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = p1synthout,
+        dataprep.res = p1prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$sp1sales),max(data$sp1sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = p1synthout,
+       dataprep.res = p1prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+p1att <- p1prep$Y1plot - (p1prep$Y0plot %*% p1synthout$solution.w)
+post.dum <- 1:104>77
+mean(p1att[post.dum])
+```
+
+```{r}
+p2prep <- dataprep(
+       foo = data,
+       dependent = 'sp2sales',
+       unit.variable = 'storeNum',
+       unit.names.variable = "StoreID",
+       time.predictors.prior = 1:77,
+       special.predictors = list(
+           list("p2price", 50:77, "mean"),
+           list("sp2sales", 77, "mean"),
+           list("sp2sales", 76, "mean"),
+           list("sp2sales", 75, "mean"),
+           list("sp2sales", 72, "mean"),
+           list("sp2sales", 69, "mean"),
+           list("sp2sales", 65, "mean")),
+       time.variable = "Weekind",
+       treatment.identifier = 109,
+       controls.identifier = c(101:108, 110:121),
+       time.optimize.ssr = 1:77,
+       time.plot = 1:104)
+p2synthout = synth(data.prep.obj = p2prep)
+print(synth.tab(dataprep.res = p2prep, synth.res = p2synthout))
+```
+
+```{r}
+par(cex.lab = 0.9, cex.axis = 0.8)
+path.plot(synth.res = p2synthout,
+        dataprep.res = p2prep,
+        tr.intake = 77,
+        Ylab = c("Sales"),
+        Xlab = c("Time"),
+        Ylim = c(min(data$sp2sales),max(data$sp2sales)),
+        Legend = c("treated store","synthetic store"),
+        Legend.position = "topleft")
+
+gaps.plot(synth.res = p2synthout,
+       dataprep.res = p2prep,
+       tr.intake = 77,
+       Ylab = c("Gap in product sales"),
+       Xlab = c("Time"),
+       Ylim = c(-50,100))
+
+p2att <- p2prep$Y1plot - (p2prep$Y0plot %*% p2synthout$solution.w)
+post.dum <- 1:104>77
+mean(p2att[post.dum])
+```

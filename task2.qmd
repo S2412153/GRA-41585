@@ -1,0 +1,162 @@
+---
+title: "Assignment 2"
+author: "Nhung Dinh, Sookyung Kim"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    embed-resources: true
+    self-contained-math: true
+toc: true
+---
+
+```{r setup, include=FALSE}
+# Load necessary packages
+library(boot) 
+library(AER) 
+library(tidyverse)
+```
+
+## Assignment 2
+
+A company conducted an advertising experiment to measure the effectiveness of a digital advertisement campaign on a website. The experiment was implemented by storing a cookie on the website visitor’s device before serving the first ad, that randomly determined whether the visitor belonged to the treatment or control group. The treatment group was eligible to see ads, while the control group did not see any ads. The company also stored additional information about ad exposure (impressions). For the treatment group, the company stored the number of times the ad was loaded when the user visited the website during the campaign period. For the control group, they stored the number of times the user would have been exposed to the ad if they were not in the control group, even though no ad was displayed to them.
+
+An important decision for the company was determining the size of the treatment and control groups. While the simplest choice would have been to randomly assign users to either group, the chief marketing officer, expecting strong advertising effects, did not want to lose too many customers by not showing them ads. Therefore, the company decided to place only 20% of the users in the control group and 80% in the treatment group.
+
+The company tracked whether users from the experiment made a purchase in their online store (using a tracking cookie). The average net contribution of a purchase is estimated to be roughly 300 NOK. The cost of advertising on the website was 100 NOK for every 1000 ad impressions.
+
+------------------------------------------------------------------------
+
+The analysis begins by reading the comma-separated values (CSV) file named "CaseData2025.csv" using the `read.csv` function.
+
+```{r}
+# read the dataset
+data <- read.csv("CaseData2025.csv", sep=";")
+str(data)
+```
+
+Summarize the data: total purchases, total customers, total impressions, conversion rate, and total profit for each group
+
+```{r}
+P = 300 # average net contribution of a purchase 
+ads_cost = 100 / 1000 # average cost of each impression
+
+# summary data
+summary <- data %>% 
+  select(test, purchase, impressions) %>%
+  group_by(test) %>%
+  summarize(purchases = sum(purchase),
+            no.customers = n(),
+            no.impressions = sum(impressions),
+            conversion.rate = mean(purchase),
+            profit = purchases*P)
+
+summary
+```
+
+It is essential to **assess** the **validity of the randomization** process and **identify** instances of **non-compliance** using the collected data.
+
+For the **randomization** check, the distribution of impressions between groups are examined using both graphical (histogram) and statistical methods. If the distributions between the treatment and control groups are not similar, this suggests potential selection bias and a violation of exchangeability.
+
+```{r}
+# plot the distribution of impressions between groups
+ggplot(data, aes(x = impressions, fill = factor(test))) +
+  geom_histogram(aes(y = after_stat(density)), alpha = 0.6, 
+                 position = "identity", bins = 30) +
+  scale_fill_manual(values = c("red", "blue"), 
+                    labels = c("Control", "Treated")) +
+  labs(title = "Distribution of Impressions: Control vs. Treated",
+       x = "Impressions", y = "", fill = 'Group') +
+  theme_minimal() +
+  facet_wrap(~test) + 
+  theme(strip.text = element_blank())
+
+# H0 : impressions distribution between groups are same
+# p-value = 0.07902 : fail to reject the null hypothesis
+ks.test(impressions ~ test, data = data)
+```
+
+The **lift in conversion rate** is calculated:
+
+$$\tau_l = \frac{\Delta \text{Conversion rate due to ads in the treated group}}{\text{Conversion rate of the treated group if they had not been treated}}$$
+
+The **incremental profit** of the treated group is calculated, account for group size and subtract advertising costs. The **lift in conversion rate** suggests **potential campaign effectiveness**, but statistical testing was crucial to determine significance.
+
+```{r}
+# lift in conversion rate
+(summary[2,5] - summary[1,5])/summary[1,5]
+
+# incremental profit from the treated group (scaling for size)
+incremental_profit = summary[2,6] - summary[1,6]*summary[2,3]/summary[1,3] - summary[2,4]*ads_cost
+incremental_profit
+
+# average incremental profit
+incremental_profit/summary[2,3]
+```
+
+To ensure **internal validity**, **statistical inference** is conducted to rule out the possibility that observed differences are due to random chance.
+
+```{r}
+# statistical tests for the conversion rates of different groups
+# H0 : difference in conversion rates = 0
+data$test <- as.factor(data$test)
+t.test(purchase ~ test, data = data)
+# p-value = 0.05064 > 0.5 : fail to reject null hypothesis 
+# confidence interval includes 0
+# the observed lift might due to random chance
+```
+
+An extended analysis was conducted by **bootstrapping 10.000 times** to calculate the 95% confidence interval for the treatment effects. The resulting **confidence interval** is (0, 0.0111), indicating a positive treatment effect.
+
+```{r}
+# Define the bootstrap function
+conversion <- function(df, indices) {
+  d <- df[indices, ]
+  base = mean(d$purchase[d$test == 0])
+  treated = mean(d$purchase[d$test == 1])
+  ATE = treated - base
+  return (c(base, treated, ATE))
+}
+
+set.seed(1234)
+# Perform bootstrap with 10000 resamples
+boot_results = boot(data = data, statistic = conversion, R = 10000)
+boot.ci(boot_results, type = "perc", index = 3)
+```
+
+Graphical analysis and regression analysis were performed, including an interaction term between impressions and treatment status to assess **frequency effect of ad exposure**
+
+```{r}
+# graphical analysis
+ggplot(data, aes(x = impressions, y = purchase, color = factor(test))) +
+  geom_point(alpha = 0.4, color = "blue") +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"),
+              se = FALSE, linetype = "dotted", linewidth = 0.8) +
+  labs(title = "Conversion Rate vs. Impressions",
+       x = "Impressions", y = "Probability of Purchase", color = "Group") +
+  theme_minimal() + theme(legend.position = 'bottom')
+
+# regression analysis
+summary(glm(purchase ~ impressions * factor(test), data, family = 'binomial'))
+# each additional impression increases the probability of purchase by 5%
+# highly significant (p-value < 0.001) 
+# impressions have a positive impact on conversion rate
+```
+
+An extended analysis was conducted by truncating the data at different levels of impressions (20, 30, 40, ..., 100) and performing a regression analysis on the purchase outcome, focusing on the interaction between impressions and treatment.
+
+The results were recorded along with the p-value for the coefficient of interaction term. The analysis indicates a true diminishing effect in the log-odds of purchases, with statistical significance (p-value ≤ 0.05) observed for impressions above 40.
+
+```{r}
+bins = seq(20, 100, by = 10)
+res = data.frame()
+for (s in bins) {
+  mod = glm(purchase ~ impressions * factor(test), 
+            data = data[data$impressions <= s, ], family = 'binomial')
+  coef_val = summary(mod)$coefficients["impressions:factor(test)1", "Estimate"]
+  pvalue = summary(mod)$coefficients["impressions:factor(test)1", "Pr(>|z|)"]
+  res = rbind(res, data.frame(Impressions = paste('<=', s),
+                              Coefficient = coef_val, pvalue = pvalue))
+}
+
+res
+```
